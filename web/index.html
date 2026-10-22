@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Asistente LFT</title>
+<style>
+  :root { --ink: #1d2530; --muted: #5b6573; --line: #dfe3e8; --accent: #7a1f2b; --bg: #f6f4f1; --card: #ffffff; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: Georgia, "Times New Roman", serif; background: var(--bg); color: var(--ink); }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 32px 16px 48px; }
+  header h1 { font-size: 28px; margin: 0 0 4px; }
+  header p { margin: 0; color: var(--muted); font-family: system-ui, sans-serif; font-size: 14px; }
+  form { margin-top: 24px; display: flex; gap: 8px; }
+  textarea { flex: 1; min-height: 56px; resize: vertical; padding: 12px; font: 16px system-ui, sans-serif;
+             border: 1px solid var(--line); border-radius: 8px; background: var(--card); }
+  button { font: 600 15px system-ui, sans-serif; border: none; border-radius: 8px; padding: 0 20px;
+           background: var(--accent); color: white; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: wait; }
+  .examples { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px; }
+  .examples span { font: 13px system-ui, sans-serif; padding: 5px 10px; border: 1px solid var(--line);
+                   border-radius: 999px; background: var(--card); cursor: pointer; color: var(--muted); }
+  .examples span:hover { border-color: var(--accent); color: var(--accent); }
+  .card { margin-top: 24px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 20px; }
+  .answer { white-space: pre-wrap; line-height: 1.6; font-size: 17px; }
+  .label { font: 600 12px system-ui, sans-serif; letter-spacing: .05em; text-transform: uppercase;
+           color: var(--muted); margin: 18px 0 8px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip { font: 600 13px system-ui, sans-serif; padding: 5px 10px; border-radius: 6px; cursor: pointer;
+          background: #f3e9ea; color: var(--accent); border: 1px solid #e6cfd2; }
+  .chip.secondary { background: transparent; color: var(--muted); border-color: var(--line); font-weight: 400; }
+  .article { margin-top: 14px; padding: 14px; border-left: 3px solid var(--accent); background: #fbfaf8;
+             white-space: pre-wrap; line-height: 1.55; font-size: 15px; max-height: 360px; overflow-y: auto; }
+  .article .where { font: 12px system-ui, sans-serif; color: var(--muted); margin-bottom: 8px; white-space: normal; }
+  .status { color: var(--muted); font: 15px system-ui, sans-serif; }
+  footer { margin-top: 32px; font: 12px system-ui, sans-serif; color: var(--muted); line-height: 1.5; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Asistente de la Ley Federal del Trabajo</h1>
+    <p id="version">Respuestas basadas en el texto oficial de la LFT, con el artículo de cada afirmación.</p>
+  </header>
+
+  <form id="form">
+    <textarea id="question" maxlength="500" placeholder="Escribe tu pregunta sobre derechos laborales…"></textarea>
+    <button id="ask">Preguntar</button>
+  </form>
+  <div class="examples" id="examples">
+    <span>¿Cuántos días de vacaciones me tocan?</span>
+    <span>¿Cuándo se debe pagar el aguinaldo?</span>
+    <span>¿Qué es la prima de antigüedad?</span>
+    <span>¿Cuánto dura el periodo de prueba?</span>
+  </div>
+
+  <div id="result"></div>
+
+  <footer>
+    Fuente: Ley Federal del Trabajo, texto vigente publicado por la Cámara de Diputados.
+    Información general; no sustituye la asesoría de un abogado laboral.
+  </footer>
+</div>
+
+<script>
+  const form = document.getElementById("form");
+  const input = document.getElementById("question");
+  const askBtn = document.getElementById("ask");
+  const result = document.getElementById("result");
+
+  fetch("/version").then(r => r.json()).then(v => {
+    document.getElementById("version").textContent =
+      `Respuestas basadas en el texto oficial de la LFT (${v.lft_version}), con el artículo de cada afirmación.`;
+  }).catch(() => {});
+
+  document.querySelectorAll("#examples span").forEach(s =>
+    s.addEventListener("click", () => { input.value = s.textContent; form.requestSubmit(); }));
+
+  // All text goes in through textContent, never innerHTML, so nothing in an answer can inject markup
+  function el(tag, cls, text) {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text !== undefined) e.textContent = text;
+    return e;
+  }
+
+  async function showArticle(id, panel) {
+    panel.replaceChildren(el("div", "status", `Cargando artículo ${id}…`));
+    try {
+      const res = await fetch(`/articulo/${encodeURIComponent(id)}`);
+      if (!res.ok) throw new Error();
+      const a = await res.json();
+      const where = [a.titulo, a.capitulo].filter(Boolean).join(" · ");
+      panel.replaceChildren(
+        el("div", "where", `Artículo ${a.id}${where ? " — " + where : ""}${a.derogado ? " (derogado)" : ""}`),
+        document.createTextNode(a.text + (a.truncated ? "\n\n[Texto recortado: el artículo completo es muy extenso.]" : "")));
+    } catch {
+      panel.replaceChildren(el("div", "status", "No se pudo cargar el artículo."));
+    }
+  }
+
+  function chips(ids, cls, onClick) {
+    const box = el("div", "chips");
+    ids.forEach(id => {
+      const c = el("span", cls, `Art. ${id}`);
+      c.addEventListener("click", () => onClick(id));
+      box.appendChild(c);
+    });
+    return box;
+  }
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const question = input.value.trim();
+    if (!question) return;
+    askBtn.disabled = true;
+    result.replaceChildren(el("div", "card status", "Buscando en la ley y redactando la respuesta…"));
+    try {
+      const res = await fetch("/ask", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question }),
+      });
+      if (!res.ok) throw new Error();
+      const data = await res.json();
+
+      const card = el("div", "card");
+      const panel = el("div", "article");
+      panel.style.display = "none";
+      // Every chip opens the same panel below the answer with that article's full text
+      const open = (id) => { panel.style.display = "block"; showArticle(id, panel); };
+
+      card.appendChild(el("div", "answer", data.answer));
+      if (data.cited.length) {
+        card.appendChild(el("div", "label", "Artículos citados (clic para leer el texto)"));
+        card.appendChild(chips(data.cited, "chip", open));
+      }
+      const others = data.retrieved.filter(id => !data.cited.map(c => c.toLowerCase()).includes(id.toLowerCase()));
+      if (others.length) {
+        card.appendChild(el("div", "label", "Otros artículos consultados"));
+        card.appendChild(chips(others, "chip secondary", open));
+      }
+      card.appendChild(panel);
+      result.replaceChildren(card);
+    } catch {
+      result.replaceChildren(el("div", "card status", "Hubo un problema al obtener la respuesta. Intenta de nuevo."));
+    }
+    askBtn.disabled = false;
+  });
+</script>
+</body>
+</html>

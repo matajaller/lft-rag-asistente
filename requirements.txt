@@ -1,0 +1,8 @@
+anthropic
+python-dotenv
+requests
+pymupdf
+numpy
+sentence-transformers
+fastapi
+uvicorn

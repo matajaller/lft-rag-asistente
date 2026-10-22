@@ -43,6 +43,13 @@ CITATION = re.compile(
 )
 
 
+def check_citations(text, retrieved_ids):
+    """Formal citations in the answer, and which of them point to articles search didn't retrieve."""
+    retrieved = {r.lower() for r in retrieved_ids}
+    cited = sorted({re.sub(r"\s+", " ", c.strip()) for c in CITATION.findall(text)})
+    return cited, [c for c in cited if c.lower() not in retrieved]
+
+
 def build_context(results):
     """Each retrieved chunk wrapped in a tag carrying its article number."""
     return "\n\n".join(
@@ -71,9 +78,7 @@ def answer(question):
         text = "No pude completar la respuesta a esta pregunta. Intenta reformularla o hacerla más específica."
 
     # Every formally cited article must be one that search actually retrieved
-    retrieved = {r["article_id"].lower() for r in results}
-    cited = sorted({re.sub(r"\s+", " ", c.strip()) for c in CITATION.findall(text)})
-    unsupported = [c for c in cited if c.lower() not in retrieved]
+    cited, unsupported = check_citations(text, [r["article_id"] for r in results])
 
     return {
         "answer": f"{text}\n\n{DISCLAIMER}",

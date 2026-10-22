@@ -23,7 +23,7 @@ STOPWORDS = {
 
 # "artículo 162", "art. 39-A", "artículo 3 Bis", "art 353-Ñ"
 ARTICLE_REF = re.compile(
-    r"art(?:[íi]culo|\.)?\s*(\d+)\s*(?:-\s*([a-zñ]))?\s*(bis|ter|qu[áa]ter)?\b", re.IGNORECASE
+    r"\bart(?:[íi]culo|\.)?\s*(\d+)\s*(?:-\s*([a-zñ]))?\s*(bis|ter|qu[áa]ter)?\b", re.IGNORECASE
 )
 
 
@@ -35,8 +35,8 @@ def _connect():
 
 # ---- direct lookup for questions that name an article ----
 
-def lookup_articles(question):
-    """Returns the first chunk of every article the question names explicitly."""
+def referenced_article_ids(question):
+    """Article ids a question names explicitly, in the database's format: '162', '39-A', '3 Bis'."""
     ids = []
     for number, letter, latin in ARTICLE_REF.findall(question):
         aid = number
@@ -45,6 +45,12 @@ def lookup_articles(question):
         if latin:
             aid += f" {latin.capitalize()}"
         ids.append(aid)
+    return ids
+
+
+def lookup_articles(question):
+    """Returns the first chunk of every article the question names explicitly."""
+    ids = referenced_article_ids(question)
     if not ids:
         return []
     conn = _connect()
