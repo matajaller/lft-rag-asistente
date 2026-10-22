@@ -11,20 +11,55 @@ EMB_PATH = ROOT / "data" / "embeddings.npy"
 IDS_PATH = ROOT / "data" / "embedding_ids.json"
 MODEL_NAME = "intfloat/multilingual-e5-base"
 
-# Common Spanish words that would match almost every article
+# Common Spanish words, plus words like 'artículo' that appear in every chunk's heading
 STOPWORDS = {
     "de", "la", "el", "los", "las", "un", "una", "unos", "unas", "y", "o", "a", "en", "por", "para",
     "con", "sin", "que", "cual", "cuales", "cuanto", "cuantos", "cuantas", "como", "me", "mi", "mis",
     "se", "su", "sus", "es", "son", "al", "del", "lo", "le", "les", "este", "esta", "ese", "esa",
     "si", "no", "tengo", "tiene", "tienen", "puedo", "puede", "hay", "ser", "mas", "muy", "cuando",
-    "donde", "despues", "antes", "yo", "nos", "ley",
+    "donde", "despues", "antes", "yo", "nos", "ley", "articulo", "dice", "establece", "trata",
+    "explicame",
 }
+
+# "artículo 162", "art. 39-A", "artículo 3 Bis", "art 353-Ñ"
+ARTICLE_REF = re.compile(
+    r"art(?:[íi]culo|\.)?\s*(\d+)\s*(?:-\s*([a-zñ]))?\s*(bis|ter|qu[áa]ter)?\b", re.IGNORECASE
+)
 
 
 def _connect():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+# ---- direct lookup for questions that name an article ----
+
+def lookup_articles(question):
+    """Returns the first chunk of every article the question names explicitly."""
+    ids = []
+    for number, letter, latin in ARTICLE_REF.findall(question):
+        aid = number
+        if letter:
+            aid += f"-{letter.upper()}"
+        if latin:
+            aid += f" {latin.capitalize()}"
+        ids.append(aid)
+    if not ids:
+        return []
+    conn = _connect()
+    try:
+        found = []
+        for aid in ids:
+            row = conn.execute(
+                "SELECT chunk_id, article_id, heading, text FROM chunks WHERE article_id = ? ORDER BY part LIMIT 1",
+                (aid,),
+            ).fetchone()
+            if row:
+                found.append(dict(row))
+        return found
+    finally:
+        conn.close()
 
 
 # ---- keyword search (BM25) ----
@@ -93,27 +128,44 @@ def semantic_search(question, k=5):
     return [{**rows[cid], "score": float(sims[i])} for cid, i in zip(wanted, top)]
 
 
-# ---- hybrid search (Reciprocal Rank Fusion) ----
+# ---- hybrid search: direct lookup first, then weighted Reciprocal Rank Fusion ----
 
-def hybrid_search(question, k=5, pool=20, rrf_k=60):
-    """Each list scores a chunk 1/(rrf_k + rank); chunks found by both lists rise to the top.
+def hybrid_search(question, k=5, pool=20, rrf_k=60, keyword_weight=0.0, rewrite=False):
+    """Articles named in the question come first. The rest is fused from semantic search
+    (weight 1.0) and keyword search (keyword_weight); each list adds weight / (rrf_k + rank).
     Returns one result per article, represented by its best-scoring chunk."""
+    out, seen = [], set()
+    for r in lookup_articles(question):
+        if r["article_id"] not in seen:
+            seen.add(r["article_id"])
+            out.append({**r, "rrf": None})
+
+    lists = [(semantic_search(question, pool), 1.0)]
+    if rewrite:
+        # A second semantic search using the law's own vocabulary; the original wording still counts,
+        # so a poor rewrite can't push out results the original question found
+        from rewrite import rewrite_query
+        rewritten = rewrite_query(question)
+        if rewritten != question:
+            lists.append((semantic_search(rewritten, pool), 1.0))
+    if keyword_weight > 0:
+        lists.append((keyword_search(question, pool), keyword_weight))
+
     scores, info = {}, {}
-    for results in (keyword_search(question, pool), semantic_search(question, pool)):
+    for results, weight in lists:
         for rank, r in enumerate(results, start=1):
-            scores[r["chunk_id"]] = scores.get(r["chunk_id"], 0.0) + 1.0 / (rrf_k + rank)
+            scores[r["chunk_id"]] = scores.get(r["chunk_id"], 0.0) + weight / (rrf_k + rank)
             info[r["chunk_id"]] = r
 
-    out, seen = [], set()
     for cid in sorted(scores, key=scores.get, reverse=True):
+        if len(out) >= k:
+            break
         aid = info[cid]["article_id"]
         if aid in seen:
             continue
         seen.add(aid)
         out.append({**info[cid], "rrf": scores[cid]})
-        if len(out) == k:
-            break
-    return out
+    return out[:k]
 
 
 def unique_articles(results, k=5):
@@ -124,26 +176,3 @@ def unique_articles(results, k=5):
             seen.add(r["article_id"])
             out.append(r["article_id"])
     return out[:k]
-
-
-if __name__ == "__main__":
-    # Each question with the article(s) a labour lawyer would point to
-    tests = [
-        ("¿Cuántos días de vacaciones me tocan después de un año de trabajo?", {"76"}),
-        ("¿Cuándo se debe pagar el aguinaldo?", {"87"}),
-        ("¿Cuáles son las causas de despido justificado?", {"47"}),
-        ("¿Cómo se pagan las horas extra?", {"67", "68"}),
-        ("¿Cuánto es la prima vacacional?", {"80"}),
-        ("¿Cuántos días de permiso de paternidad me dan?", {"132"}),
-        ("Si me despiden sin causa, ¿qué me tienen que pagar?", {"48", "50"}),
-    ]
-    hits = {"keyword": 0, "semantic": 0, "hybrid": 0}
-    for question, expected in tests:
-        print(question)
-        for name, fn in (("keyword", keyword_search), ("semantic", semantic_search), ("hybrid", hybrid_search)):
-            found = unique_articles(fn(question, k=10))[:5]
-            hit = bool(expected & set(found))
-            hits[name] += hit
-            print(f"   {name:<9} {'HIT ' if hit else 'miss'} {found}")
-        print(f"   expected: {sorted(expected)}\n")
-    print("Top-5 hits:", {name: f"{n}/{len(tests)}" for name, n in hits.items()})
